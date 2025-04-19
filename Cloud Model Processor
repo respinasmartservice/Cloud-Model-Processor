@@ -1,0 +1,89 @@
+## Requirements
+- Python 3.11
+- trimesh
+- open3d
+- numpy
+
+Install dependencies:
+```
+python -m pip install trimesh open3d numpy
+```
+
+## Usage
+```
+python decimate_mesh.py \
+    --input model_in.obj \
+    --output model_out.obj \
+    --reduction 0.8 \
+    --max_error 0.01
+```
+
+- `--reduction`: Target fraction of faces to remove (0.8 = remove 80%).
+- `--max_error`: Maximum allowed Hausdorff distance in meters (default 0.01).
+
+---
+# decimate_mesh.py
+import argparse
+import numpy as np
+import trimesh
+import open3d as o3d
+
+
+def mesh_trimesh_to_open3d(tm: trimesh.Trimesh) -> o3d.geometry.TriangleMesh:
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(tm.vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(tm.faces)
+    mesh.compute_vertex_normals()
+    return mesh
+
+
+def mesh_open3d_to_trimesh(om: o3d.geometry.TriangleMesh) -> trimesh.Trimesh:
+    verts = np.asarray(om.vertices)
+    faces = np.asarray(om.triangles)
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+
+def compute_hausdorff(orig: o3d.geometry.TriangleMesh, dec: o3d.geometry.TriangleMesh, samples=100000):
+    # Sample points uniformly on original
+    pc_orig = orig.sample_points_uniformly(number_of_points=samples)
+    pc_dec = dec.sample_points_uniformly(number_of_points=samples)
+    # Compute directed distances
+    d1 = np.asarray(pc_orig.compute_point_cloud_distance(pc_dec))
+    d2 = np.asarray(pc_dec.compute_point_cloud_distance(pc_orig))
+    return max(d1.max(), d2.max())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Quadric mesh simplification with Hausdorff error check.")
+    parser.add_argument('--input',  required=True, help='Input mesh file (.obj/.ply)')
+    parser.add_argument('--output', required=True, help='Output mesh file path')
+    parser.add_argument('--reduction', type=float, default=0.8, help='Fraction of faces to remove')
+    parser.add_argument('--max_error', type=float, default=0.01, help='Max Hausdorff error (m)')
+    args = parser.parse_args()
+
+    # Load
+    tm = trimesh.load_mesh(args.input, force='mesh')
+    faces_in = len(tm.faces)
+    faces_target = int(faces_in * (1 - args.reduction))
+    print(f"Loaded mesh with {faces_in} faces; target {faces_target} faces.")
+
+    # Convert to Open3D
+    om = mesh_trimesh_to_open3d(tm)
+
+    # Simplify
+    om_simp = om.simplify_quadric_decimation(target_number_of_triangles=faces_target)
+    print(f"Simplified to {len(om_simp.triangles)} faces.")
+
+    # Compute Hausdorff error
+    err = compute_hausdorff(om, om_simp)
+    print(f"Hausdorff error: {err:.5f} m (max allowed {args.max_error} m)")
+    if err > args.max_error:
+        print("Warning: error exceeds threshold.")
+    
+    # Export
+    tm_out = mesh_open3d_to_trimesh(om_simp)
+    tm_out.export(args.output)
+    print(f"Exported simplified mesh to {args.output}.")
+
+if __name__ == '__main__':
+    main()
